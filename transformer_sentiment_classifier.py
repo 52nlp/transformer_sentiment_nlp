@@ -7,14 +7,17 @@ from tensorflow.keras import activations
 import matplotlib.pyplot as plt
 from tensorflow.keras import layers
 from tensorflow.keras.layers import Activation
-from tensorflow.keras.layers import Activation
 from tensorflow.keras.preprocessing.sequence import pad_sequences
+from tensorflow.keras.callbacks import EarlyStopping
+from matplotlib import pyplot
+print ('earger:', tf.executing_eagerly())
+
 
 num_words = 20000
 maxlen = 100
 
 ## Code setting
-num_tests = 3
+num_tests = 5
 epochs = 5
 
 vocab_size = num_words  # Only consider the top 20k words
@@ -26,7 +29,31 @@ x_train = pad_sequences(x_train, maxlen=maxlen)
 x_test = pad_sequences(x_test, maxlen=maxlen)
 
 
+def get_angles(pos, i, d_model):
+  angle_rates = 1 / np.power(10000, (2 * (i//2)) / np.float32(d_model))
+  return pos * angle_rates
 
+def positional_encoding(position, d_model):
+  angle_rads = get_angles(np.arange(position)[:, np.newaxis],
+                          np.arange(d_model)[np.newaxis, :],
+                          d_model)
+  
+  # apply sin to even indices in the array; 2i
+  sines = np.sin(angle_rads[:, 0::2])
+  
+  # apply cos to odd indices in the array; 2i+1
+  cosines = np.cos(angle_rads[:, 1::2])
+  
+  pos_encoding = np.concatenate([sines, cosines], axis=-1)
+  
+  pos_encoding = pos_encoding[np.newaxis, ...]
+    
+  return tf.cast(pos_encoding, dtype=tf.float32)
+
+def create_padding_mask(seq):
+  # padding mask 的工作就是把索引序列中為 0 的位置設為 1
+  mask = tf.cast(tf.equal(seq, 0), tf.float32)
+  return mask[:, tf.newaxis, tf.newaxis, :] #　broadcasting
 
 class baseTestModel():
     """The base class for testing model
@@ -37,6 +64,7 @@ class baseTestModel():
         self.stats = {}
         self.accuracies = []
         self.history = []
+        self.es = EarlyStopping(monitor='val_loss', mode='min', verbose=1, patience=2, restore_best_weights=True)
 
     def compile_and_test(self, num_test=3, batch_size=64, epochs=2, validation_split=0.2, verbose=2):
         # compile the model
@@ -55,7 +83,11 @@ class baseTestModel():
             tf.random.set_seed(random_seed)
             # Training
             history = self.model.fit(x_train, y_train, batch_size=batch_size, epochs=epochs,
-                                     validation_split=validation_split, verbose=verbose)
+                                     validation_split=validation_split, verbose=verbose, callbacks=[self.es])
+            pyplot.plot(history.history['loss'], label='train')
+            pyplot.plot(history.history['val_loss'], label='val')
+            pyplot.legend()
+            pyplot.show()
             self.history.append(history)
             # eval on test dataset
             test_scores = self.model.evaluate(x_test, y_test, verbose=2)
@@ -104,18 +136,29 @@ class baseTestModel():
 
 
 class Tansformer(baseTestModel):
-    def __init__(self):
+    def __init__(self,  is_masked):
         # inherit
         super().__init__()
         # build model
+        self.is_masked=is_masked
 
+        print ("MASKED:", self.is_masked)
+        
+        if self.is_masked:
+            self.model_name = 'TRANSFORMER_MASKED'
+        else:
+            self.model_name = 'TRANSFORMER_NO_MASKED'
         embedding_inputs = keras.Input(shape=(maxlen,))
+        
         word_emb = layers.Embedding(input_dim=vocab_size, output_dim=embed_dim)
-        position_emb = layers.Embedding(input_dim=maxlen, output_dim=embed_dim)
-        positions = np.array(range(maxlen))
-        positions = position_emb(positions)
+        #position_emb = layers.Embedding(input_dim=maxlen, output_dim=embed_dim)
+        
+        position_emb = positional_encoding(maxlen, embed_dim)
+        #positions = np.array(range(maxlen))
+        #positions = position_emb(positions)
         embedding_outputs = word_emb(embedding_inputs)
-        embedding_outputs += positions
+        embedding_outputs *= tf.math.sqrt(tf.cast(embed_dim, tf.float32))
+        embedding_outputs += position_emb
 
         print('embedding_inputs', embedding_inputs)
         print('embedding_outputs', embedding_outputs)
@@ -184,8 +227,13 @@ class Tansformer(baseTestModel):
         dropout_rate = 0.1
 
         encoder_inputs = keras.Input(shape=(maxlen,))
+        padding_mask = create_padding_mask(encoder_inputs) 
+        tf.print (padding_mask)
         embeded_inputs = Embedding(encoder_inputs)
-        multiHead_output = MultiHeadSelfAttention(embeded_inputs)
+        if self.is_masked:
+            multiHead_output = MultiHeadSelfAttention(embeded_inputs, mask=padding_mask)
+        else:
+            multiHead_output = MultiHeadSelfAttention(embeded_inputs)
         out1 = layers.Dropout(dropout_rate)(multiHead_output)
         out1 = layers.LayerNormalization(epsilon=1e-6)(out1 + embeded_inputs)
         feed_forword_nn = keras.Sequential(
@@ -205,7 +253,7 @@ class Tansformer(baseTestModel):
         x = layers.Dense(20, activation="relu", kernel_initializer="he_normal")(x)
         x = layers.Dropout(0.4)(x)
         outputs = layers.Dense(1, activation="sigmoid")(x)
-        self.model = keras.Model(inputs=inputs, outputs=outputs, name="TRANSFORMER")
+        self.model = keras.Model(inputs=inputs, outputs=outputs, name=self.model_name)
 
 
 
@@ -231,9 +279,9 @@ class LSTM_DENSE_CON(baseTestModel):
 
 
 # call
-model = Tansformer()
+model = Tansformer(is_masked=False)
 model.compile_and_test(num_test=num_tests, epochs=epochs)
 
 # call
-model = LSTM_DENSE_CON()
-model.compile_and_test(num_test=num_tests, epochs=epochs)
+#model = LSTM_DENSE_CON()
+#model.compile_and_test(num_test=num_tests, epochs=epochs)
